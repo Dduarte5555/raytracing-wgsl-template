@@ -134,6 +134,7 @@ fn get_camera(lookfrom: vec3f, lookat: vec3f, vup: vec3f, vfov: f32, aspect_rati
   return camera;
 }
 
+
 fn envoriment_color(direction: vec3f, color1: vec3f, color2: vec3f) -> vec3f
 {
   var unit_direction = normalize(direction);
@@ -151,95 +152,222 @@ fn envoriment_color(direction: vec3f, color1: vec3f, color2: vec3f) -> vec3f
   return col;
 }
 
-fn check_ray_collision(r: ray, max: f32) -> hit_record
-{
-  var spheresCount = i32(uniforms[19]);
-  var quadsCount = i32(uniforms[20]);
-  var boxesCount = i32(uniforms[21]);
-  var trianglesCount = i32(uniforms[22]);
-  var meshCount = i32(uniforms[27]);
+fn check_ray_collision(r: ray, max: f32) -> hit_record {
+    var spheresCount = i32(uniforms[19]);
+    var quadsCount = i32(uniforms[20]);
+    var boxesCount = i32(uniforms[21]);
+    var trianglesCount = i32(uniforms[22]);
+    var meshCount = i32(uniforms[27]);
 
-  var record = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
-  var closest = record;
+    var record = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
+    var closest_t = max;
 
-  return closest;
+    for (var i = 0; i < spheresCount; i = i + 1) {
+        var sphere = spheresb[i];
+        var temp_record = hit_record();
+
+        if (hit_sphere(sphere.transform.xyz, sphere.transform.w, r, &temp_record, closest_t)) {
+            closest_t = temp_record.t;
+            record = temp_record;
+            record.object_color = sphere.color;
+            record.object_material = sphere.material;
+        }
+    }
+
+    for (var i = 0; i < trianglesCount; i = i + 1) {
+        var triangle = trianglesb[i];
+        var temp_record = hit_record();
+
+        if (hit_triangle(r, triangle.v0.xyz, triangle.v1.xyz, triangle.v2.xyz, &temp_record, closest_t)) {
+            closest_t = temp_record.t;
+            record = temp_record;
+        }
+    }
+
+    for (var i = 0; i < boxesCount; i = i + 1) {
+        var box = boxesb[i];
+        if (AABB_intersect(r, box.center.xyz - box.radius.xyz, box.center.xyz + box.radius.xyz)) {
+            record.hit_anything = true;
+        }
+    }
+
+    if (closest_t < max) {
+        record.hit_anything = true;
+    }
+
+    return record;
 }
 
-fn lambertian(normal : vec3f, absorption: f32, random_sphere: vec3f, rng_state: ptr<function, u32>) -> material_behaviour
-{
-  return material_behaviour(true, vec3f(0.0));
+fn lambertian(normal: vec3f, absorption: f32, random_sphere: vec3f, rng_state: ptr<function, u32>) -> material_behaviour {
+    var scatter_direction = normal + rng_next_vec3_in_unit_sphere(rng_state);
+
+    // Evitar a direção zero (caso o vetor aleatório cancele a normal)
+    if (all(scatter_direction == vec3f(0.0))) {
+        scatter_direction = normal;
+    }
+
+    return material_behaviour(true, normalize(scatter_direction));
 }
 
-fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> material_behaviour
-{
-  return material_behaviour(false, vec3f(0.0));
+fn metal(normal: vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> material_behaviour {
+    var reflected = reflect(normalize(direction), normalize(normal));
+    var scattered = reflected + fuzz * random_sphere;
+
+    if (dot(scattered, normal) <= 0.0) {
+        return material_behaviour(false, vec3f(0.0));
+    }
+
+    return material_behaviour(true, normalize(scattered));
+}
+
+fn refract(uv: vec3f, n: vec3f, eta: f32) -> vec3f {
+    var cos_theta = dot(-uv, n);
+    var r_out_perp = eta * (uv + cos_theta * n);
+    var r_out_parallel = -sqrt(abs(1.0 - dot(r_out_perp, r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
+    var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
 }
 
 fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontface: bool, random_sphere: vec3f, fuzz: f32, rng_state: ptr<function, u32>) -> material_behaviour
 {  
-  return material_behaviour(false, vec3f(0.0));
+    var refract_ratio = select(refraction_index, 1.0 / refraction_index, frontface);
+    var unit_direction = normalize(r_direction);
+
+    var cos_theta = min(dot(-unit_direction, normal), 1.0);
+    var sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    var cannot_refract = refract_ratio * sin_theta > 1.0;
+
+    var direction: vec3f;
+    if (cannot_refract || reflectance(cos_theta, refract_ratio) > rng_next_float(rng_state)) {
+        direction = reflect(unit_direction, normal);
+    } else {
+        direction = refract(unit_direction, normal, refract_ratio);
+    }
+
+    direction += fuzz * random_sphere;
+
+    return material_behaviour(true, normalize(direction));
 }
 
-fn emmisive(color: vec3f, light: f32) -> material_behaviour
-{
-  return material_behaviour(false, vec3f(0.0));
+fn emissive(color: vec3f, intensity: f32) -> material_behaviour {
+    // Garantir que a cor e a intensidade estão dentro de limites aceitáveis
+    var clamped_intensity = clamp(intensity, 0.0, 10.0); // Limite máximo opcional
+    var clamped_color = clamp(color, vec3f(0.0), vec3f(1.0)); // Garante que as cores estão entre 0 e 1
+
+    // Retornar o comportamento com a luz emitida
+    return material_behaviour(false, clamped_color * clamped_intensity);
 }
 
-fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
-{
-  var maxbounces = i32(uniforms[2]);
-  var light = vec3f(0.0);
-  var color = vec3f(1.0);
-  var r_ = r;
-  
-  var backgroundcolor1 = int_to_rgb(i32(uniforms[11]));
-  var backgroundcolor2 = int_to_rgb(i32(uniforms[12]));
-  var behaviour = material_behaviour(true, vec3f(0.0));
+fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f {
+    var maxbounces = i32(uniforms[2]);
+    var light = vec3f(0.0);
+    var color = vec3f(1.0);
+    var r_ = r;
 
-  for (var j = 0; j < maxbounces; j = j + 1)
-  {
+    var backgroundcolor1 = int_to_rgb(i32(uniforms[11]));
+    var backgroundcolor2 = int_to_rgb(i32(uniforms[12]));
+    var behaviour = material_behaviour(true, vec3f(0.0));
 
-  }
+    for (var j = 0; j < maxbounces; j = j + 1) {
+        var record = check_ray_collision(r_, RAY_TMAX);
 
-  return light;
+        // Se não houver interseção, retorna cor do fundo
+        if (!record.hit_anything) {
+            light += color * envoriment_color(r_.direction, backgroundcolor1, backgroundcolor2);
+            break;
+        }
+
+        // Processar comportamento do material no ponto de interseção
+        if (record.object_material.x == 0.0) {
+            behaviour = lambertian(record.normal, 1.0, vec3f(0.0), rng_state);
+        } else if (record.object_material.x == 1.0) {
+            var random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
+            behaviour = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
+            color *= vec3f(1.0); // Não aplica a cor diretamente para metais
+        } else if (record.object_material.x == 2.0) {
+            behaviour = dielectric(
+                record.normal,
+                r_.direction,
+                record.object_material.y,
+                record.frontface,
+                vec3f(0.0),
+                record.object_material.z,
+                rng_state
+            );
+        } else if (record.object_material.x == 3.0) {
+             behaviour = emissive(record.object_color.rgb, record.object_material.y);
+    
+              // Limitar intensidade da emissão (opcional)
+              var intensity = min(record.object_material.y, 10.0);
+              
+              // Adicionar luz emitida diretamente
+              light += intensity * behaviour.direction;
+
+              // Interromper o traçamento, já que não há espalhamento
+              break;
+        }
+
+        // Atualizar o raio para o próximo bounce
+        r_ = ray(record.p, behaviour.direction);
+        color *= record.object_color.rgb; // Multiplica para difusos e dielétricos
+
+        // Se o material não espalha (absorve), interrompe o loop
+        if (!behaviour.scatter) {
+            break;
+        }
+    }
+
+    return light;
+}
+
+fn accumulate_framebuffer(index: u32, color_out: vec4f) -> vec4f {
+    return mix(rtfb[index], color_out, 0.5);
 }
 
 @compute @workgroup_size(THREAD_COUNT, THREAD_COUNT, 1)
-fn render(@builtin(global_invocation_id) id : vec3u)
-{
-    var rez = uniforms[1];
+fn render(@builtin(global_invocation_id) id: vec3u) {
+    var rez = u32(uniforms[1]);
     var time = u32(uniforms[0]);
-
-    // init_rng (random number generator) we pass the pixel position, resolution and frame
-    var rng_state = init_rng(vec2(id.x, id.y), vec2(u32(rez)), time);
-
-    // Get uv
+    var rng_state = init_rng(vec2(id.x, id.y), vec2(rez), time);
     var fragCoord = vec2f(f32(id.x), f32(id.y));
-    var uv = (fragCoord + sample_square(&rng_state)) / vec2(rez);
+    var uv = (fragCoord + sample_square(&rng_state)) / vec2(f32(rez));
 
-    // Camera
     var lookfrom = vec3(uniforms[7], uniforms[8], uniforms[9]);
     var lookat = vec3(uniforms[23], uniforms[24], uniforms[25]);
+    var cam = get_camera(
+        lookfrom,
+        lookat,
+        vec3(0.0, 1.0, 0.0),
+        uniforms[10],
+        1.0,
+        uniforms[6],
+        uniforms[5]
+    );
 
-    // Get camera
-    var cam = get_camera(lookfrom, lookat, vec3(0.0, 1.0, 0.0), uniforms[10], 1.0, uniforms[6], uniforms[5]);
     var samples_per_pixel = i32(uniforms[4]);
+    var color = vec3f(0.0);
 
-    var color = vec3(rng_next_float(&rng_state), rng_next_float(&rng_state), rng_next_float(&rng_state));
+    for (var s = 0; s < samples_per_pixel; s = s + 1) {
+        var ray = get_ray(cam, uv, &rng_state);
+        var sample_color = trace(ray, &rng_state);
+        color = color + sample_color;
+    }
 
-    // Steps:
-    // 1. Loop for each sample per pixel
-    // 2. Get ray
-    // 3. Call trace function
-    // 4. Average the color
-
+    color = color / f32(samples_per_pixel);
     var color_out = vec4(linear_to_gamma(color), 1.0);
-    var map_fb = mapfb(id.xy, rez);
-    
-    // 5. Accumulate the color
-    var should_accumulate = uniforms[3];
+    var map_fb = mapfb(id.xy, f32(rez)); // mapfb ainda retorna i32
 
-    // Set the color to the framebuffer
-    rtfb[map_fb] = color_out;
-    fb[map_fb] = color_out;
+    var should_accumulate = uniforms[3];
+    if (should_accumulate > 0.0) {
+        color_out = accumulate_framebuffer(u32(map_fb), color_out); // Conversão para u32
+    }
+
+    rtfb[u32(map_fb)] = color_out;
+    fb[u32(map_fb)] = color_out;
 }

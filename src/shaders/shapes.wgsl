@@ -1,6 +1,34 @@
-fn hit_sphere(center: vec3f, radius: f32, r: ray, record: ptr<function, hit_record>, max: f32)
-{
+fn hit_sphere(center: vec3f, radius: f32, r: ray, record: ptr<function, hit_record>, max: f32) -> bool {
+    var oc = r.origin - center;
+    var a = dot(r.direction, r.direction);
+    var b = 2.0 * dot(oc, r.direction);
+    var c = dot(oc, oc) - radius * radius;
+    var discriminant = b * b - 4.0 * a * c;
 
+    if (discriminant < 0.0) {
+        return false;
+    }
+
+    var sqrtd = sqrt(discriminant);
+
+    // Verificar as possíveis raízes
+    var t1 = (-b - sqrtd) / (2.0 * a);
+    if (t1 > RAY_TMIN && t1 < max) {
+        (*record).t = t1;
+        (*record).p = ray_at(r, t1);
+        (*record).normal = normalize((*record).p - center);
+        return true;
+    }
+
+    var t2 = (-b + sqrtd) / (2.0 * a);
+    if (t2 > RAY_TMIN && t2 < max) {
+        (*record).t = t2;
+        (*record).p = ray_at(r, t2);
+        (*record).normal = normalize((*record).p - center);
+        return true;
+    }
+
+    return false;
 }
 
 fn hit_quad(r: ray, Q: vec4f, u: vec4f, v: vec4f, record: ptr<function, hit_record>, max: f32)
@@ -47,37 +75,42 @@ fn hit_quad(r: ray, Q: vec4f, u: vec4f, v: vec4f, record: ptr<function, hit_reco
   record.hit_anything = true;
 }
 
-fn hit_triangle(r: ray, v0: vec3f, v1: vec3f, v2: vec3f, record: ptr<function, hit_record>, max: f32)
-{
-  var v1v0 = v1 - v0;
-  var v2v0 = v2 - v0;
-  var rov0 = r.origin - v0;
+fn hit_triangle(r: ray, v0: vec3f, v1: vec3f, v2: vec3f, record: ptr<function, hit_record>, max: f32) -> bool {
+    var v1v0 = v1 - v0;
+    var v2v0 = v2 - v0;
+    var rov0 = r.origin - v0;
 
-  var n = cross(v1v0, v2v0);
-  var q = cross(rov0, r.direction);
+    var n = cross(v1v0, v2v0);
+    var q = cross(rov0, r.direction);
 
-  var d = 1.0 / dot(r.direction, n);
+    var d = dot(r.direction, n);
+    if (abs(d) < 1e-8) {
+        return false; // Evita divisão por zero (raio paralelo ao triângulo)
+    }
 
-  var u = d * dot(-q, v2v0);
-  var v = d * dot(q, v1v0);
-  var t = d * dot(-n, rov0);
+    var inv_d = 1.0 / d;
 
-  if (u < 0.0 || u > 1.0 || v < 0.0 || (u + v) > 1.0)
-  {
-    record.hit_anything = false;
-    return;
-  }
+    var u = inv_d * dot(-q, v2v0);
+    if (u < 0.0 || u > 1.0) {
+        return false; // Fora do triângulo
+    }
 
-  if (t < RAY_TMIN || t > max)
-  {
-    record.hit_anything = false;
-    return;
-  }
+    var v = inv_d * dot(q, v1v0);
+    if (v < 0.0 || (u + v) > 1.0) {
+        return false; // Fora do triângulo
+    }
 
-  record.t = t;
-  record.p = ray_at(r, t);
-  record.normal = normalize(n);
-  record.hit_anything = true;
+    var t = inv_d * dot(-n, rov0);
+    if (t < RAY_TMIN || t > max) {
+        return false; // Fora do intervalo válido
+    }
+
+    (*record).t = t;
+    (*record).p = ray_at(r, t);
+    (*record).normal = normalize(n);
+    (*record).hit_anything = true;
+
+    return true;
 }
 
 fn hit_box(r: ray, center: vec3f, rad: vec3f, record: ptr<function, hit_record>, t_max: f32)
