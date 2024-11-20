@@ -280,12 +280,14 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f {
         // Se não houver interseção, retorna cor do fundo
         if (!record.hit_anything) {
             light += color * envoriment_color(r_.direction, backgroundcolor1, backgroundcolor2);
+            color *= record.object_color.rgb;
             break;
         }
 
         // Processar comportamento do material no ponto de interseção
         if (record.object_material.x == 0.0) {
             behaviour = lambertian(record.normal, 1.0, vec3f(0.0), rng_state);
+            color *= record.object_color.rgb;
         } else if (record.object_material.x == 1.0) {
             var random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
             behaviour = metal(record.normal, r_.direction, record.object_material.y, random_sphere);
@@ -300,6 +302,7 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f {
                 record.object_material.z,
                 rng_state
             );
+            color *= record.object_color.rgb;
         } else if (record.object_material.x == 3.0) {
              behaviour = emissive(record.object_color.rgb, record.object_material.y);
     
@@ -309,13 +312,15 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f {
               // Adicionar luz emitida diretamente
               light += intensity * behaviour.direction;
 
+              color *= record.object_color.rgb;
+
               // Interromper o traçamento, já que não há espalhamento
               break;
         }
 
         // Atualizar o raio para o próximo bounce
         r_ = ray(record.p, behaviour.direction);
-        color *= record.object_color.rgb; // Multiplica para difusos e dielétricos
+        // color *= record.object_color.rgb; // Multiplica para difusos e dielétricos
 
         // Se o material não espalha (absorve), interrompe o loop
         if (!behaviour.scatter) {
